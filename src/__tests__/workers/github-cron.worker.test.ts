@@ -184,7 +184,8 @@ describe('GitHubCronJob', () => {
         mockedGithubService.searchRepositories
           .mockResolvedValueOnce(mockRepos) // TypeScript query
           .mockResolvedValueOnce(mockRepos) // JavaScript query
-          .mockResolvedValueOnce(mockRepos); // Python query
+          .mockResolvedValueOnce(mockRepos) // Python query
+          .mockResolvedValueOnce(mockRepos); // User query
 
         mockedRepositoryService.createOrUpdate.mockResolvedValue({
           id: 'repo-1',
@@ -207,7 +208,7 @@ describe('GitHubCronJob', () => {
         const result = await githubCronJob.executeManually();
 
         expect(result.success).toBe(true);
-        expect(mockedGithubService.searchRepositories).toHaveBeenCalledTimes(3);
+        expect(mockedGithubService.searchRepositories).toHaveBeenCalledTimes(4);
       });
 
       it('should continue processing after individual repo save fails', async () => {
@@ -265,8 +266,8 @@ describe('GitHubCronJob', () => {
         const result = await githubCronJob.executeManually();
 
         expect(result.success).toBe(true);
-        // 2 repos × 3 search queries; first save fails but remaining continue
-        expect(mockedRepositoryService.createOrUpdate).toHaveBeenCalledTimes(6);
+        // 2 repos × 4 search queries; first save fails but remaining continue
+        expect(mockedRepositoryService.createOrUpdate).toHaveBeenCalledTimes(8);
       });
     });
 
@@ -300,14 +301,15 @@ describe('GitHubCronJob', () => {
 
         // Per-query isolation: all queries failing still completes the job
         expect(result.success).toBe(true);
-        expect(mockedGithubService.searchRepositories).toHaveBeenCalledTimes(3);
+        expect(mockedGithubService.searchRepositories).toHaveBeenCalledTimes(4);
       });
 
       it('should handle partial query failures', async () => {
         mockedGithubService.searchRepositories
           .mockResolvedValueOnce([]) // First query succeeds
           .mockRejectedValueOnce(new Error('Rate limited')) // Second query fails
-          .mockResolvedValueOnce([]); // Third query succeeds
+          .mockResolvedValueOnce([]) // Third query succeeds
+          .mockResolvedValueOnce([]); // Fourth query succeeds
 
         mockedRepositoryService.countAll.mockResolvedValue(0);
 
@@ -475,7 +477,7 @@ describe('GitHubCronJob', () => {
 
       const status = githubCronJob.getStatus();
 
-      expect(status.schedule).toBe('*/20 * * * * *');
+      expect(status.schedule).toBe('0 */6 * * *');
 
       githubCronJob.stop();
     });
@@ -545,7 +547,8 @@ describe('GitHubCronJob', () => {
       mockedGithubService.searchRepositories
         .mockResolvedValueOnce(mockRepos) // First query succeeds
         .mockRejectedValueOnce(new Error('Rate limited')) // Second query fails
-        .mockResolvedValueOnce(mockRepos); // Third query succeeds
+        .mockResolvedValueOnce(mockRepos) // Third query succeeds
+        .mockResolvedValueOnce(mockRepos); // Fourth query succeeds
 
       mockedRepositoryService.createOrUpdate.mockResolvedValue({
         id: 'repo-1',
