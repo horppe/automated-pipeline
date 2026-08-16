@@ -6,6 +6,7 @@ import { healthRoutes } from './routes/health.js';
 import { userRoutes } from './routes/users.js';
 import { repositoryRoutes } from './routes/repositories.js';
 import { githubCronJob } from './workers/github-cron.worker.js';
+import { closeSecurityQueue } from './workers/queue.worker.js';
 
 export async function buildApp() {
   const app = Fastify({
@@ -28,12 +29,13 @@ export async function buildApp() {
   await app.register(userRoutes, { prefix: '/api/users' });
   await app.register(repositoryRoutes, { prefix: '/api/repositories' });
 
-  // Start the GitHub cron job
+  // Start the GitHub cron job (security queue worker starts on import)
   githubCronJob.start();
 
   // Graceful shutdown
   app.addHook('onClose', async () => {
     githubCronJob.stop();
+    await closeSecurityQueue();
   });
 
   return app;

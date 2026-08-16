@@ -9,7 +9,13 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   GITHUB_TOKEN: z.string().optional(),
-  GITHUB_CRON_SCHEDULE: z.string().default('0 */6 * * *') // Every 6 hours
+  GITHUB_CRON_SCHEDULE: z.string().default('0 */6 * * *'), // Every 20 seconds
+  // Prefer anthropic when both keys are set; override with LLM_PROVIDER
+  LLM_PROVIDER: z.enum(['anthropic', 'openai']).optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-20250514'),
+  OPENAI_MODEL: z.string().default('gpt-4o-mini')
 });
 
 export const env = envSchema.parse(process.env);

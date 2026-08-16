@@ -22,6 +22,14 @@ interface GitHubRepo {
   };
 }
 
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  labels: Array<{ name: string }>;
+}
+
 class GitHubService {
   private readonly baseURL = 'https://api.github.com';
   private readonly headers: Record<string, string>;
@@ -175,6 +183,91 @@ class GitHubService {
     }
 
     throw new Error('Failed to fetch repository after all retries');
+  }
+
+  /**
+   * Fetch README content for a repository (decoded from base64 when needed)
+   */
+  async getReadme(owner: string, repo: string): Promise<string | null> {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/repos/${owner}/${repo}/readme`,
+        {
+          headers: this.headers,
+          timeout: 30000
+        }
+      );
+
+      const content = response.data?.content;
+      if (typeof content !== 'string') {
+        return null;
+      }
+
+      const encoding = response.data?.encoding;
+      if (encoding === 'base64') {
+        return Buffer.from(content, 'base64').toString('utf-8');
+      }
+
+      return content;
+    } catch (error) {
+      const axiosError = error as AxiosError;
+      if (axiosError.response?.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch open issues for a repository (excludes pull requests)
+   */
+  async getIssues(
+    owner: string,
+    repo: string,
+    perPage: number = 20
+  ): Promise<GitHubIssue[]> {
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/repos/${owner}/${repo}/issues`,
+        {
+          headers: this.headers,
+          params: {
+            state: 'open',
+            per_page: perPage,
+            sort: 'updated',
+            direction: 'desc'
+          },
+          timeout: 30000
+        }
+      );
+
+      const items: Array<{
+        number: number;
+        title: string;
+        body?: string | null;
+        state: string;
+        pull_request?: unknown;
+        labels?: Array<string | { name: string }>;
+      }> = Array.isArray(response.data) ? response.data : [];
+
+      return items
+        .filter((item) => !item.pull_request)
+        .map((item) => ({
+          number: item.number,
+          title: item.title,
+          body: item.body ?? null,
+          state: item.state,
+          labels: (item.labels || []).map((label) =>
+            typeof label === 'string' ? { name: label } : { name: label.name }
+          )
+        }));
+    } catch (error) {
+      const axiosError = error as AxiosError;
+      if (axiosError.response?.status === 404) {
+        return [];
+      }
+      throw error;
+    }
   }
 }
 

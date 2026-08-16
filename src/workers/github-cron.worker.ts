@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { githubService } from '../services/github.service.js';
 import { repositoryService } from '../services/repository.service.js';
+import { enqueueSecurityAnalysis } from './queue.worker.js';
 import { env } from '../config/env.js';
 
 /**
@@ -65,12 +66,14 @@ export class GitHubCronJob {
 
       // Search for popular TypeScript repositories
       const queries = [
-        'language:typescript stars:>1000 sort:stars',
-        'language:javascript stars:>1000 sort:stars',
-        'language:python stars:>1000 sort:stars'
+        // 'language:typescript stars:>1000 sort:stars',
+        // 'language:javascript stars:>1000 sort:stars',
+        // 'language:python stars:>1000 sort:stars',
+        'user:horppe sort:stars'
       ];
 
       let totalSaved = 0;
+      let totalEnqueued = 0;
 
       for (const query of queries) {
         try {
@@ -81,7 +84,7 @@ export class GitHubCronJob {
 
           for (const repo of repos) {
             try {
-              await repositoryService.createOrUpdate({
+              const saved = await repositoryService.createOrUpdate({
                 githubId: repo.id,
                 name: repo.name,
                 fullName: repo.full_name,
@@ -95,6 +98,23 @@ export class GitHubCronJob {
               });
 
               totalSaved++;
+
+              try {
+                await enqueueSecurityAnalysis({
+                  repositoryId: saved.id,
+                  githubId: saved.githubId,
+                  owner: saved.owner,
+                  name: saved.name,
+                  fullName: saved.fullName,
+                  description: saved.description
+                });
+                totalEnqueued++;
+              } catch (error) {
+                console.error(
+                  `Failed to enqueue security analysis for ${repo.full_name}:`,
+                  error instanceof Error ? error.message : error
+                );
+              }
             } catch (error) {
               console.error(
                 `Failed to save repository ${repo.full_name}:`,
@@ -115,6 +135,7 @@ export class GitHubCronJob {
 
       console.log(`=== GitHub Cron Job Completed ===`);
       console.log(`Saved/Updated: ${totalSaved} repositories`);
+      console.log(`Enqueued for security analysis: ${totalEnqueued}`);
       console.log(`Total repositories in DB: ${count}`);
       console.log(`Duration: ${(duration / 1000).toFixed(2)}s`);
     } catch (error) {
@@ -122,6 +143,7 @@ export class GitHubCronJob {
         'GitHub cron job failed:',
         error instanceof Error ? error.message : error
       );
+      throw error;
     } finally {
       this.isRunning = false;
     }

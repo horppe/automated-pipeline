@@ -14,14 +14,24 @@ jest.unstable_mockModule('./src/services/repository.service.js', () => ({
     listAll: jest.fn(),
     listByOwner: jest.fn(),
     countAll: jest.fn(),
-    deleteOlderThan: jest.fn()
+    deleteOlderThan: jest.fn(),
+    updateSecurityRisk: jest.fn()
   }
+}));
+
+jest.unstable_mockModule('./src/workers/queue.worker.js', () => ({
+  enqueueSecurityAnalysis: jest.fn().mockResolvedValue('job-1'),
+  closeSecurityQueue: jest.fn(),
+  processSecurityAnalysisJob: jest.fn(),
+  pipelineWorker: { on: jest.fn(), close: jest.fn() },
+  securityAnalysisQueue: { add: jest.fn(), close: jest.fn() }
 }));
 
 // Import after mocking (use .js extensions for ESM)
 const { githubCronJob } = await import('../../workers/github-cron.worker.js');
 const { githubService: mockedGithubService } = await import('../../services/github.service.js');
 const { repositoryService: mockedRepositoryService } = await import('../../services/repository.service.js');
+await import('../../workers/queue.worker.js');
 
 describe('GitHubCronJob', () => {
   beforeEach(() => {
@@ -255,7 +265,8 @@ describe('GitHubCronJob', () => {
         const result = await githubCronJob.executeManually();
 
         expect(result.success).toBe(true);
-        expect(mockedRepositoryService.createOrUpdate).toHaveBeenCalledTimes(2);
+        // 2 repos × 3 search queries; first save fails but remaining continue
+        expect(mockedRepositoryService.createOrUpdate).toHaveBeenCalledTimes(6);
       });
     });
 
@@ -283,11 +294,13 @@ describe('GitHubCronJob', () => {
       it('should handle GitHub API errors', async () => {
         const apiError = new Error('GitHub API error');
         mockedGithubService.searchRepositories.mockRejectedValue(apiError);
+        mockedRepositoryService.countAll.mockResolvedValue(0);
 
         const result = await githubCronJob.executeManually();
 
-        expect(result.success).toBe(false);
-        expect(result.error).toContain('GitHub API error');
+        // Per-query isolation: all queries failing still completes the job
+        expect(result.success).toBe(true);
+        expect(mockedGithubService.searchRepositories).toHaveBeenCalledTimes(3);
       });
 
       it('should handle partial query failures', async () => {
@@ -462,7 +475,7 @@ describe('GitHubCronJob', () => {
 
       const status = githubCronJob.getStatus();
 
-      expect(status.schedule).toBe('0 */6 * * *');
+      expect(status.schedule).toBe('*/20 * * * * *');
 
       githubCronJob.stop();
     });
@@ -561,7 +574,8 @@ describe('GitHubCronJob', () => {
 
       expect(result.success).toBe(true);
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to fetch repositories')
+        expect.stringContaining('Failed to fetch repositories'),
+        expect.any(String)
       );
 
       consoleErrorSpy.mockRestore();

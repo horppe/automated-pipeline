@@ -17,23 +17,33 @@ model User {
   @@map("users")
 }
 
+enum SecurityRisk {
+  High
+  Medium
+  Low
+}
+
 model Repository {
-  id            String   @id @default(cuid())
-  githubId      Int      @unique
-  name          String
-  fullName      String   @unique
-  description   String?
-  url           String   @unique
-  language      String?
-  stars         Int      @default(0)
-  forks         Int      @default(0)
-  openIssues    Int      @default(0)
-  owner         String
-  lastFetchedAt DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                  String        @id @default(cuid())
+  githubId            Int           @unique
+  name                String
+  fullName            String        @unique
+  description         String?
+  url                 String        @unique
+  language            String?
+  stars               Int           @default(0)
+  forks               Int           @default(0)
+  openIssues          Int           @default(0)
+  owner               String
+  securityRisk        SecurityRisk?
+  securitySummary     String?
+  securityAnalyzedAt  DateTime?
+  lastFetchedAt       DateTime      @default(now())
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
   @@index([owner])
   @@index([lastFetchedAt])
+  @@index([securityRisk])
   @@map("repositories")
 }

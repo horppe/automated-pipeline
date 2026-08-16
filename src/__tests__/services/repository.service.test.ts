@@ -6,6 +6,8 @@ jest.unstable_mockModule('./src/lib/prisma.js', () => ({
       findUnique: jest.fn(),
       findMany: jest.fn(),
       count: jest.fn(),
+      groupBy: jest.fn(),
+      update: jest.fn(),
       deleteMany: jest.fn()
     }
   },
@@ -247,6 +249,7 @@ describe('RepositoryService', () => {
 
       expect(result).toEqual(mockRepos);
       expect(mockedPrisma.repository.findMany).toHaveBeenCalledWith({
+        where: undefined,
         orderBy: { stars: 'desc' },
         take: 50,
         skip: 0
@@ -259,6 +262,7 @@ describe('RepositoryService', () => {
       await repositoryService.listAll();
 
       expect(mockedPrisma.repository.findMany).toHaveBeenCalledWith({
+        where: undefined,
         orderBy: { stars: 'desc' },
         take: 100,
         skip: 0
@@ -279,9 +283,31 @@ describe('RepositoryService', () => {
       await repositoryService.listAll(100, 10000);
 
       expect(mockedPrisma.repository.findMany).toHaveBeenCalledWith({
+        where: undefined,
         orderBy: { stars: 'desc' },
         take: 100,
         skip: 10000
+      });
+    });
+
+    it('should filter by search term', async () => {
+      mockedPrisma.repository.findMany.mockResolvedValueOnce([]);
+
+      await repositoryService.listAll(100, 0, 'react');
+
+      expect(mockedPrisma.repository.findMany).toHaveBeenCalledWith({
+        where: {
+          OR: [
+            { name: { contains: 'react', mode: 'insensitive' } },
+            { fullName: { contains: 'react', mode: 'insensitive' } },
+            { owner: { contains: 'react', mode: 'insensitive' } },
+            { description: { contains: 'react', mode: 'insensitive' } },
+            { language: { contains: 'react', mode: 'insensitive' } }
+          ]
+        },
+        orderBy: { stars: 'desc' },
+        take: 100,
+        skip: 0
       });
     });
   });
@@ -362,7 +388,9 @@ describe('RepositoryService', () => {
       const result = await repositoryService.countAll();
 
       expect(result).toBe(300);
-      expect(mockedPrisma.repository.count).toHaveBeenCalled();
+      expect(mockedPrisma.repository.count).toHaveBeenCalledWith({
+        where: undefined
+      });
     });
 
     it('should return 0 for empty database', async () => {
@@ -371,6 +399,60 @@ describe('RepositoryService', () => {
       const result = await repositoryService.countAll();
 
       expect(result).toBe(0);
+    });
+
+    it('should apply search filter when counting', async () => {
+      mockedPrisma.repository.count.mockResolvedValueOnce(5);
+
+      const result = await repositoryService.countAll('react');
+
+      expect(result).toBe(5);
+      expect(mockedPrisma.repository.count).toHaveBeenCalledWith({
+        where: {
+          OR: [
+            { name: { contains: 'react', mode: 'insensitive' } },
+            { fullName: { contains: 'react', mode: 'insensitive' } },
+            { owner: { contains: 'react', mode: 'insensitive' } },
+            { description: { contains: 'react', mode: 'insensitive' } },
+            { language: { contains: 'react', mode: 'insensitive' } }
+          ]
+        }
+      });
+    });
+  });
+
+  describe('getSecurityRiskBreakdown', () => {
+    it('should aggregate security risk counts', async () => {
+      mockedPrisma.repository.groupBy.mockResolvedValueOnce([
+        { securityRisk: 'High', _count: { _all: 3 } },
+        { securityRisk: 'Medium', _count: { _all: 8 } },
+        { securityRisk: 'Low', _count: { _all: 12 } },
+        { securityRisk: null, _count: { _all: 2 } }
+      ]);
+
+      const result = await repositoryService.getSecurityRiskBreakdown();
+
+      expect(result).toEqual({
+        High: 3,
+        Medium: 8,
+        Low: 12,
+        Unanalyzed: 2,
+        total: 25
+      });
+    });
+
+    it('should return zeros when no repositories exist', async () => {
+      mockedPrisma.repository.groupBy.mockResolvedValueOnce([]);
+
+      const result = await repositoryService.getSecurityRiskBreakdown();
+
+      expect(result).toEqual({
+        High: 0,
+        Medium: 0,
+        Low: 0,
+        Unanalyzed: 0,
+        total: 0
+      });
     });
   });
 

@@ -1,78 +1,103 @@
 # GitHub Cron Job Documentation
 
+**Scan date:** 2026-08-16
+
 ## Overview
 
-The automated pipeline includes a robust GitHub repository fetching system that:
-- ✅ Fetches popular repositories from the GitHub API
-- ✅ Handles rate limiting with exponential backoff
-- ✅ Stores repository metadata in PostgreSQL
-- ✅ Runs on a configurable cron schedule
-- ✅ Provides REST APIs to query stored repositories
+The automated pipeline includes a GitHub repository fetching and security-analysis system that:
+
+- Fetches repositories from the GitHub Search API on a configurable cron schedule
+- Handles rate limiting with exponential backoff
+- Upserts repository metadata into PostgreSQL
+- Enqueues each saved repo for LLM security risk categorization (BullMQ)
+- Exposes REST APIs (and a Next.js dashboard) to query repos and risk breakdown
 
 ## Architecture
+
+### Pipeline flow
+
+```text
+cron tick
+  → githubService.searchRepositories(query)
+  → repositoryService.createOrUpdate(...)
+  → enqueueSecurityAnalysis({ repositoryId, ... })  // jobId: security-${id}
+       → Worker: getReadme + getIssues
+       → Anthropic or OpenAI → { risk, summary }
+       → repositoryService.updateSecurityRisk(...)
+```
 
 ### Components
 
 1. **GitHub Service** (`src/services/github.service.ts`)
-   - Handles all GitHub API interactions
-   - Implements exponential backoff for rate limiting
-   - Parses GitHub API responses
+   - Search repos, fetch single repo, README, and open issues
+   - Exponential backoff on rate limiting
 
 2. **Repository Service** (`src/services/repository.service.ts`)
-   - ORM layer for database operations
-   - CRUD operations for repositories
-   - Upsert logic to avoid duplicates
+   - Upsert / list / search / security risk updates and breakdown
 
 3. **GitHub Cron Worker** (`src/workers/github-cron.worker.ts`)
-   - Schedules and executes the cron job
-   - Orchestrates fetching and storage
-   - Provides admin controls (manual trigger, status)
+   - Schedules fetch + store + enqueue
+   - Admin manual trigger and status
 
-4. **Repository Routes** (`src/routes/repositories.ts`)
-   - REST API endpoints for querying repositories
-   - Admin endpoints for cron management
+4. **Security Queue Worker** (`src/workers/queue.worker.ts`)
+   - BullMQ queue `security-analysis`
+   - LLM categorization (Anthropic preferred when key present; OpenAI fallback)
+   - Concurrency 2; 3 attempts with exponential backoff
+
+5. **Repository Routes** (`src/routes/repositories.ts`)
+   - List (with search), by owner, by full name, security stats, admin cron controls
+
+6. **Frontend** (`frontend/`)
+   - Next.js dashboard on port 3001 consuming the repository APIs
 
 ## Configuration
 
 ### Environment Variables
 
-Add to `.env`:
+Add to `.env` (see `.env.example`):
 
 ```env
 # GitHub API token (optional but recommended for higher rate limits)
-# Get yours from: https://github.com/settings/tokens
-# Required scopes: public_repo (read-only access)
 GITHUB_TOKEN=ghp_your_token_here
 
-# Cron schedule (standard cron expression format)
-# Default: Every 6 hours
-GITHUB_CRON_SCHEDULE="0 */6 * * *"
+# Cron schedule (node-cron; optional seconds field)
+# Code default when unset: every 6 hours — 0 */6 * * *
+# Local example in .env.example: every 20 seconds
+GITHUB_CRON_SCHEDULE="*/20 * * * * *"
+
+# LLM for security risk (at least one key required for analysis jobs)
+# When LLM_PROVIDER is unset: Anthropic if ANTHROPIC_API_KEY set, else OpenAI
+# LLM_PROVIDER=anthropic
+# LLM_PROVIDER=openai
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
+OPENAI_MODEL=gpt-4o-mini
 ```
 
 ### Cron Schedule Format
 
-The cron schedule uses standard cron expression syntax:
+Uses **node-cron**, which supports an optional leading **seconds** field:
 
 ```
-┌───────────── second (0 - 59)
+┌───────────── second (0 - 59)          [optional]
 │ ┌───────────── minute (0 - 59)
 │ │ ┌───────────── hour (0 - 23)
 │ │ │ ┌───────────── day of month (1 - 31)
-│ │ │ │ ┌───────────── month (0 - 11)
-│ │ │ │ │ ┌───────────── day of week (0 - 6) (Sunday to Saturday)
-│ │ │ │ │ │
+│ │ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ │ ┌───────────── day of week (0 - 7) (Sunday = 0 or 7)
 │ │ │ │ │ │
 * * * * * *
 ```
 
 **Common Examples:**
-- `0 */6 * * *` - Every 6 hours (default)
+- `*/20 * * * * *` - Every 20 seconds (local example)
+- `0 */6 * * *` - Every 6 hours (code default)
 - `0 0 * * *` - Daily at midnight
 - `0 */12 * * *` - Every 12 hours
 - `0 2 * * 0` - Weekly on Sunday at 2 AM
-- `*/30 * * * *` - Every 30 minutes
 
-See [crontab.guru](https://crontab.guru) for more patterns.
+See [crontab.guru](https://crontab.guru) for 5-field patterns; use node-cron docs for 6-field (with seconds).
 
 ## API Endpoints
 
@@ -80,11 +105,10 @@ See [crontab.guru](https://crontab.guru) for more patterns.
 
 **GET** `/api/repositories`
 
-Query all repositories stored in the database.
-
 **Parameters:**
-- `limit` (number, default: 100, max: 100) - Results per page
-- `offset` (number, default: 0) - Pagination offset
+- `limit` (number, default: 100, max: 100)
+- `offset` (number, default: 0)
+- `search` (string, optional) — case-insensitive match on name, fullName, owner, description, language
 
 **Response:**
 ```json
@@ -102,9 +126,12 @@ Query all repositories stored in the database.
       "forks": 500,
       "openIssues": 42,
       "owner": "owner-name",
-      "lastFetchedAt": "2026-08-15T20:00:00Z",
-      "createdAt": "2026-08-15T19:00:00Z",
-      "updatedAt": "2026-08-15T20:00:00Z"
+      "securityRisk": "Medium",
+      "securitySummary": "1-3 sentence rationale from the LLM",
+      "securityAnalyzedAt": "2026-08-16T00:00:00.000Z",
+      "lastFetchedAt": "2026-08-16T00:00:00.000Z",
+      "createdAt": "2026-08-15T19:00:00.000Z",
+      "updatedAt": "2026-08-16T00:00:00.000Z"
     }
   ],
   "pagination": {
@@ -115,16 +142,26 @@ Query all repositories stored in the database.
 }
 ```
 
+`securityRisk` / `securitySummary` / `securityAnalyzedAt` are `null` until the queue worker finishes analysis.
+
+### Security Risk Breakdown
+
+**GET** `/api/repositories/stats/security-risk`
+
+```json
+{
+  "High": 2,
+  "Medium": 10,
+  "Low": 5,
+  "Unanalyzed": 3,
+  "total": 20
+}
+```
+
 ### Get Repositories by Owner
 
 **GET** `/api/repositories/owner/:owner`
 
-Query repositories by GitHub owner/organization.
-
-**Parameters:**
-- `owner` (string) - GitHub username or organization name
-
-**Response:**
 ```json
 {
   "data": [...],
@@ -136,27 +173,12 @@ Query repositories by GitHub owner/organization.
 
 **GET** `/api/repositories/:fullName`
 
-Get a single repository by full name (owner/repo).
-
-**Parameters:**
-- `fullName` (string) - GitHub full repository name (e.g., "torvalds/linux")
-
-**Response:**
-```json
-{
-  "id": "unique-id",
-  "githubId": 12345,
-  ...
-}
-```
+Get by full name (e.g. `torvalds/linux`). Returns `404` if missing.
 
 ### Manual Cron Trigger (Admin)
 
 **POST** `/api/repositories/admin/trigger`
 
-Manually trigger the GitHub cron job immediately.
-
-**Response:**
 ```json
 {
   "success": true,
@@ -168,14 +190,11 @@ Manually trigger the GitHub cron job immediately.
 
 **GET** `/api/repositories/admin/status`
 
-Get the current status of the GitHub cron job.
-
-**Response:**
 ```json
 {
   "running": true,
   "isExecuting": false,
-  "schedule": "0 */6 * * *"
+  "schedule": "*/20 * * * * *"
 }
 ```
 
@@ -186,85 +205,93 @@ Get the current status of the GitHub cron job.
 - **Unauthenticated:** 60 requests/hour
 - **Authenticated:** 5,000 requests/hour
 
+Search and per-repo README/issues calls all count toward the limit. Security analysis adds extra traffic after each fetch.
+
 ### Exponential Backoff Strategy
 
-When rate limited (HTTP 403), the system:
+When rate limited (HTTP 403 with remaining 0):
 
-1. Detects the rate limit via `x-ratelimit-remaining` header
-2. Extracts reset time from `x-ratelimit-reset` header
-3. Calculates exponential backoff: `delay = baseDelay * 2^attempt + random(0-1000)ms`
-4. Retries the request
-5. Gives up after 5 retries with logging
-
-**Example backoff sequence:**
-- Attempt 1: ~1 second + jitter
-- Attempt 2: ~2 seconds + jitter
-- Attempt 3: ~4 seconds + jitter
-- Attempt 4: ~8 seconds + jitter
-- Attempt 5: ~16 seconds + jitter
+1. Reads `x-ratelimit-remaining` / `x-ratelimit-reset`
+2. Backoff: `delay = baseDelay * 2^attempt + random(0-1000)ms`
+3. Retries (search: up to 5; single-repo fetch: up to 3)
+4. Gives up with logged reset time
 
 ## Search Queries
 
-The cron job currently searches for popular repositories in three categories:
+Configured in `src/workers/github-cron.worker.ts`. **Current active query** (as of scan):
 
 ```typescript
 const queries = [
-  'language:typescript stars:>1000 sort:stars',
-  'language:javascript stars:>1000 sort:stars',
-  'language:python stars:>1000 sort:stars'
+  // Popular-language queries remain commented out for local use:
+  // 'language:typescript stars:>1000 sort:stars',
+  // 'language:javascript stars:>1000 sort:stars',
+  // 'language:python stars:>1000 sort:stars',
+  'user:horppe sort:stars'
 ];
 ```
 
-To modify queries, edit `src/workers/github-cron.worker.ts`:
-
-```typescript
-const queries = [
-  'language:go stars:>500',
-  'language:rust stars:>500',
-  'topic:machine-learning stars:>100'
-];
-```
+Restore broader queries by uncommenting / editing that array.
 
 **Common query examples:**
-- `language:javascript stars:>5000` - Popular JavaScript repos
-- `topic:react` - Repositories tagged with React topic
-- `created:>2024-01-01` - Repos created after Jan 1, 2024
-- `is:archived` - Archived repositories
+- `language:javascript stars:>5000`
+- `topic:react`
+- `created:>2024-01-01`
+- `user:some-org sort:stars`
 
-See [GitHub search documentation](https://docs.github.com/en/search-github/searching-on-github/searching-for-repositories) for all options.
+See [GitHub search documentation](https://docs.github.com/en/search-github/searching-on-github/searching-for-repositories).
+
+## Security Analysis Queue
+
+| Detail | Value |
+| --- | --- |
+| Queue name | `security-analysis` |
+| Job name | `analyze-security` |
+| Job id | `security-${repositoryId}` (idempotent per repo) |
+| Concurrency | 2 |
+| Retries | 3, exponential backoff (2s base) |
+| Inputs | README (≤12k chars) + up to 15 open issues (body ≤500 chars each) |
+| Output | `High` \| `Medium` \| `Low` + summary string |
+
+Without an LLM API key, enqueue still succeeds but jobs fail until keys are configured.
 
 ## Database Schema
 
 ### Repository Model
 
 ```prisma
+enum SecurityRisk {
+  High
+  Medium
+  Low
+}
+
 model Repository {
-  id            String   @id @default(cuid())
-  githubId      Int      @unique
-  name          String
-  fullName      String   @unique
-  description   String?
-  url           String   @unique
-  language      String?
-  stars         Int      @default(0)
-  forks         Int      @default(0)
-  openIssues    Int      @default(0)
-  owner         String
-  lastFetchedAt DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                  String         @id @default(cuid())
+  githubId            Int            @unique
+  name                String
+  fullName            String         @unique
+  description         String?
+  url                 String         @unique
+  language            String?
+  stars               Int            @default(0)
+  forks               Int            @default(0)
+  openIssues          Int            @default(0)
+  owner               String
+  securityRisk        SecurityRisk?
+  securitySummary     String?
+  securityAnalyzedAt  DateTime?
+  lastFetchedAt       DateTime       @default(now())
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 
   @@index([owner])
   @@index([lastFetchedAt])
+  @@index([securityRisk])
   @@map("repositories")
 }
 ```
 
-**Indexes:**
-- `githubId` - Unique constraint for GitHub repo IDs
-- `fullName` - Unique constraint for owner/repo names
-- `owner` - Quick lookups by owner
-- `lastFetchedAt` - Track which repos need refreshing
+Migration: `prisma/migrations/20260815234000_add_security_risk`.
 
 ## Usage Examples
 
@@ -273,131 +300,87 @@ model Repository {
 ```typescript
 import { repositoryService } from './services/repository.service';
 import { githubCronJob } from './workers/github-cron.worker';
+import { enqueueSecurityAnalysis } from './workers/queue.worker';
 
-// List all repositories
-const repos = await repositoryService.listAll(50, 0);
-
-// Find by owner
-const fbRepos = await repositoryService.listByOwner('facebook');
-
-// Manually trigger cron
+const repos = await repositoryService.listAll(50, 0, 'react');
+const breakdown = await repositoryService.getSecurityRiskBreakdown();
 await githubCronJob.executeManually();
-
-// Check status
-const status = githubCronJob.getStatus();
 ```
 
 ### cURL
 
 ```bash
-# List repositories
-curl http://localhost:3000/api/repositories?limit=10
+# List + search
+curl 'http://localhost:3000/api/repositories?limit=10&search=react'
 
-# Get Facebook repositories
+# Risk breakdown
+curl http://localhost:3000/api/repositories/stats/security-risk
+
+# By owner / full name
 curl http://localhost:3000/api/repositories/owner/facebook
-
-# Get specific repo
 curl http://localhost:3000/api/repositories/facebook/react
 
-# Manually trigger fetch
+# Admin
 curl -X POST http://localhost:3000/api/repositories/admin/trigger
-
-# Check cron status
 curl http://localhost:3000/api/repositories/admin/status
 ```
 
 ## Error Handling
 
-The system handles various error scenarios:
-
 ### Rate Limiting
-- Detects 403 Forbidden responses
-- Extracts reset time from headers
-- Retries with exponential backoff
-- Logs reset time for user awareness
+- Detects 403 + remaining 0; retries with backoff; logs reset time
 
 ### Connection Errors
-- Timeout errors (30 second default)
-- Network failures
-- DNS resolution issues
+- 30s Axios timeout; network/DNS failures logged and thrown
+
+### Queue / LLM Errors
+- Missing API keys → job fails with clear error
+- Invalid LLM JSON → parse failure and retry
+- Per-repo enqueue failures do not stop the cron batch
 
 ### Data Errors
-- Invalid GitHub responses
-- Missing fields in API responses
-- Database constraint violations (upsert prevents duplicates)
-
-All errors are logged with context for debugging.
+- Upsert on `githubId` avoids duplicate rows
+- Missing README (404) → analysis continues with `(no README)`
 
 ## Performance Considerations
 
-### Fetch Performance
-- Current: 300 repositories in ~22 seconds
-- Rate limited by GitHub API (search queries consume 100 points per request)
-- 3 queries × 100 results = 300 repos
-
-### Database Performance
-- Upsert pattern prevents duplicate data
-- Indexes on `owner` and `lastFetchedAt` for quick queries
-- Batch operations handled by Prisma ORM
-
-### Recommendations
-- Use authenticated tokens to maximize rate limits
-- Adjust cron schedule based on your needs
-- Monitor logs for rate limit warnings
-- Consider archiving old records (30+ days) for performance
+- Fetch volume depends on active search queries (`per_page: 100` per query)
+- Each analyzed repo costs additional GitHub calls (README + issues) plus one LLM request
+- Prefer authenticated `GITHUB_TOKEN` and a sane cron interval in production
+- BullMQ retains last 100 completed / 50 failed jobs
 
 ## Troubleshooting
 
 ### Cron job not running
 ```bash
-# Check server logs for "GitHub cron job started successfully"
-# Verify GITHUB_CRON_SCHEDULE is valid cron expression
-# Check /api/repositories/admin/status endpoint
+# Logs should include "GitHub cron job started successfully"
+# GET /api/repositories/admin/status
+# Validate GITHUB_CRON_SCHEDULE with node-cron (seconds field if used)
 ```
+
+### Security jobs stuck / failing
+- Ensure Redis is up (`REDIS_URL`)
+- Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
+- Check worker logs for `Security analysis started/completed` or job failures
 
 ### Rate limit errors
-```
-Error: Rate limit exceeded. Reset at 2026-08-15T21:00:00Z
-```
-- Add `GITHUB_TOKEN` to `.env` for higher limits (5000/hour vs 60/hour)
-- Reduce cron frequency (increase schedule interval)
-- Use smaller search queries (fewer results per request)
+- Add `GITHUB_TOKEN`; reduce cron frequency; narrow search queries
 
-### Database errors
-```
-Error: unique constraint violation on githubId
-```
-- This shouldn't happen with upsert pattern
-- Check database for corrupted records
-- Run: `npx prisma db push` to resync schema
-
-### Missing repositories
-- Check if queries are too restrictive (stars:>1000)
-- Modify queries in `github-cron.worker.ts`
-- Manually trigger with POST `/api/repositories/admin/trigger`
-- Check logs for API errors
+### Missing security fields
+- Repo rows appear immediately; risk fields fill asynchronously after the worker runs
 
 ## Security
 
-### GitHub Token Safety
-- Store token in `.env` (never commit to Git)
-- Use personal access tokens with `public_repo` scope only
-- Rotate tokens periodically
-- Monitor GitHub security settings
-
-### Rate Limit Safety
-- Never hardcode API credentials in code
-- Validate cron expressions before using
-- Limit admin endpoints to authenticated users (recommended future enhancement)
-- Log all cron executions for audit trails
+- Keep tokens/keys in `.env` only; never commit them
+- GitHub PAT: minimal scopes (public repo read)
+- Admin cron endpoints are currently unauthenticated — protect before exposing publicly
+- LLM prompts include only README/issue text already public on GitHub
 
 ## Future Enhancements
 
 - [ ] Authentication middleware for admin endpoints
 - [ ] Webhook support for real-time updates
-- [ ] Advanced filtering and search
-- [ ] Repository trend analysis (stars over time)
-- [ ] Notification system for new trending repos
 - [ ] Custom search query management via API
-- [ ] Data export (CSV, JSON)
+- [ ] Re-analyze stale security assessments on a schedule
 - [ ] Archived record cleanup jobs
+- [ ] Data export (CSV, JSON)
