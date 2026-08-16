@@ -66,9 +66,9 @@ export class GitHubCronJob {
 
       // Search for popular TypeScript repositories
       const queries = [
-        // 'language:typescript stars:>1000 sort:stars',
-        // 'language:javascript stars:>1000 sort:stars',
-        // 'language:python stars:>1000 sort:stars',
+        'language:typescript stars:>1000 sort:stars',
+        'language:javascript stars:>1000 sort:stars',
+        'language:python stars:>1000 sort:stars',
         'user:horppe sort:stars'
       ];
 
